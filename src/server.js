@@ -9,6 +9,10 @@ import { cleanupOldFiles } from './middleware/upload.js';
 
 const app = express();
 
+// Trust proxy - Required for Render, Heroku, and other cloud platforms
+// This allows express-rate-limit to work correctly behind a reverse proxy
+app.set('trust proxy', 1);
+
 // Security middleware
 app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' },

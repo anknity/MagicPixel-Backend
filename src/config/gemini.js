@@ -4,10 +4,10 @@ import config from './index.js';
 const genAI = new GoogleGenerativeAI(config.gemini.apiKey);
 
 // Available Gemini models (in order of preference)
+// Note: gemini-1.5-flash is deprecated, only use 2.0 models
 const GEMINI_MODELS = [
   'gemini-2.0-flash',      // Latest fast model
   'gemini-2.0-flash-lite', // Lightweight fast model
-  'gemini-1.5-flash',      // Previous stable model
 ];
 
 // Current model to use (can be changed if quota is exceeded)
