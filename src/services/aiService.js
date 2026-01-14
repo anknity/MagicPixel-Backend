@@ -253,7 +253,11 @@ const extractIntentFromResponse = (response, userPrompt) => {
  * Fallback rule-based processing when AI is unavailable
  */
 const fallbackProcessing = (userPrompt) => {
-  return extractIntentFromResponse('', userPrompt);
+  const result = extractIntentFromResponse('', userPrompt);
+  // Add flag to indicate this was processed using fallback (AI unavailable)
+  result.usedFallback = true;
+  result.fallbackReason = 'AI service quota exceeded. Using smart preset processing.';
+  return result;
 };
 
 /**
