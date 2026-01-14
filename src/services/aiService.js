@@ -1,9 +1,9 @@
-import { getGeminiVisionModel, switchToNextModel, getCurrentModelName } from '../config/gemini.js';
+import { getGeminiVisionModel, switchToNextModel, getCurrentModelName, getAvailableModels } from '../config/gemini.js';
 import sharp from 'sharp';
 
-// Retry configuration
-const MAX_RETRIES = 3;
-const RETRY_DELAY_MS = 2000;
+// Retry configuration - increased to support more model fallbacks
+const MAX_RETRIES = 7; // Match the number of available models
+const RETRY_DELAY_MS = 1500;
 
 /**
  * Sleep helper for retry delays
