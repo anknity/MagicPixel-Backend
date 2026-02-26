@@ -8,6 +8,8 @@ import backgroundRemoveRouter from './backgroundRemove.js';
 import aiEnhanceRouter from './aiEnhance.js';
 import aiEditRouter from './aiEdit.js';
 import cloudinaryToolsRouter from './cloudinaryTools.js';
+import watermarkRemoveRouter from './watermarkRemove.js';
+import cropRouter from './crop.js';
 
 const router = express.Router();
 
@@ -17,7 +19,8 @@ router.get('/health', (req, res) => {
     success: true,
     message: 'MagicPixels API is running',
     timestamp: new Date().toISOString(),
-    version: '1.0.0',
+    version: '2.0.0',
+    features: ['groq-ai', 'watermark-removal', 'crop', 'pdf-tools', 'background-remove', 'ai-enhance'],
   });
 });
 
@@ -31,5 +34,7 @@ router.use('/background-remove', backgroundRemoveRouter);
 router.use('/ai-enhance', aiEnhanceRouter);
 router.use('/ai-edit', aiEditRouter);
 router.use('/cloudinary', cloudinaryToolsRouter);
+router.use('/watermark-remove', watermarkRemoveRouter);
+router.use('/crop', cropRouter);
 
 export default router;

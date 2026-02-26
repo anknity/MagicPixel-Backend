@@ -240,6 +240,65 @@ export const getPdfMetadata = async (pdfBuffer) => {
   };
 };
 
+/**
+ * Add page numbers to PDF
+ */
+export const addPageNumbers = async (pdfBuffer, options = {}) => {
+  const {
+    position = 'bottom-center', // bottom-left, bottom-center, bottom-right, top-left, top-center, top-right
+    fontSize = 12,
+    startFrom = 1,
+    format = 'Page {n} of {total}',
+  } = options;
+
+  const pdfDoc = await PDFDocument.load(pdfBuffer);
+  const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  const pages = pdfDoc.getPages();
+  const totalPages = pages.length;
+
+  for (let i = 0; i < pages.length; i++) {
+    const page = pages[i];
+    const { width, height } = page.getSize();
+    const pageNum = i + startFrom;
+    const text = format.replace('{n}', pageNum).replace('{total}', totalPages);
+    const textWidth = font.widthOfTextAtSize(text, fontSize);
+
+    let x, y;
+    if (position.includes('left')) x = 40;
+    else if (position.includes('right')) x = width - textWidth - 40;
+    else x = (width - textWidth) / 2;
+
+    if (position.includes('top')) y = height - 30;
+    else y = 30;
+
+    page.drawText(text, {
+      x, y, size: fontSize, font,
+      color: rgb(0.3, 0.3, 0.3),
+    });
+  }
+
+  return Buffer.from(await pdfDoc.save());
+};
+
+/**
+ * Rotate PDF pages
+ */
+export const rotatePdfPages = async (pdfBuffer, rotation = 90, pageIndices = null) => {
+  const pdfDoc = await PDFDocument.load(pdfBuffer);
+  const pages = pdfDoc.getPages();
+
+  const targetPages = pageIndices
+    ? pageIndices.map(i => pages[i]).filter(Boolean)
+    : pages;
+
+  for (const page of targetPages) {
+    const currentRotation = page.getRotation().angle;
+    page.setRotation({ type: 'degrees', angle: currentRotation + rotation });
+  }
+
+  return Buffer.from(await pdfDoc.save());
+};
+
 export default {
   createPdfFromImages,
   extractImagesFromPdf,
@@ -248,4 +307,6 @@ export default {
   addWatermark,
   compressPdf,
   getPdfMetadata,
+  addPageNumbers,
+  rotatePdfPages,
 };

@@ -1,6 +1,7 @@
 import express from 'express';
 import { uploadMemory } from '../middleware/upload.js';
 import { uploadBufferToCloudinary } from '../config/cloudinary.js';
+import cloudinary from 'cloudinary';
 import {
   createPdfFromImages,
   mergePdfs,
@@ -8,6 +9,8 @@ import {
   addWatermark,
   compressPdf,
   getPdfMetadata,
+  addPageNumbers,
+  rotatePdfPages,
 } from '../services/pdfService.js';
 
 const router = express.Router();
@@ -324,6 +327,147 @@ router.post('/metadata', uploadMemory.single('pdf'), async (req, res, next) => {
     res.json({
       success: true,
       data: metadata,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/pdf/to-images
+ * Convert PDF pages to images using Cloudinary
+ */
+router.post('/to-images', uploadMemory.single('pdf'), async (req, res, next) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        error: 'No PDF file uploaded',
+      });
+    }
+
+    const { format = 'png', quality = 90, dpi = 150 } = req.body;
+
+    // Upload PDF to Cloudinary
+    const pdfResult = await uploadBufferToCloudinary(req.file.buffer, {
+      resource_type: 'image',
+      format: 'pdf',
+      public_id: `pdf_convert_${Date.now()}`,
+    });
+
+    // Get page count from metadata
+    const metadata = await getPdfMetadata(req.file.buffer);
+    const pageCount = metadata.pageCount;
+
+    // Generate image URLs for each page using Cloudinary transformations
+    const pages = [];
+    for (let i = 1; i <= pageCount; i++) {
+      const imageUrl = pdfResult.secure_url
+        .replace('/upload/', `/upload/pg_${i},w_${Math.round(dpi * 8.27)},q_${quality},f_${format}/`)
+        .replace('.pdf', `.${format}`);
+
+      pages.push({
+        page: i,
+        url: imageUrl,
+        format,
+      });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        pages,
+        totalPages: pageCount,
+        format,
+        quality: parseInt(quality),
+        pdfPublicId: pdfResult.public_id,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/pdf/add-page-numbers
+ * Add page numbers to PDF
+ */
+router.post('/add-page-numbers', uploadMemory.single('pdf'), async (req, res, next) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        error: 'No PDF file uploaded',
+      });
+    }
+
+    const {
+      position = 'bottom-center',
+      fontSize = 12,
+      startFrom = 1,
+      format = 'Page {n} of {total}',
+    } = req.body;
+
+    const numberedPdf = await addPageNumbers(req.file.buffer, {
+      position,
+      fontSize: parseInt(fontSize),
+      startFrom: parseInt(startFrom),
+      format,
+    });
+
+    const cloudinaryResult = await uploadBufferToCloudinary(numberedPdf, {
+      resource_type: 'raw',
+      format: 'pdf',
+    });
+
+    res.json({
+      success: true,
+      data: {
+        url: cloudinaryResult.secure_url,
+        publicId: cloudinaryResult.public_id,
+        size: cloudinaryResult.bytes,
+        position,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/pdf/rotate
+ * Rotate PDF pages
+ */
+router.post('/rotate', uploadMemory.single('pdf'), async (req, res, next) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        error: 'No PDF file uploaded',
+      });
+    }
+
+    const { rotation = 90, pages: pageIndices } = req.body;
+
+    const parsedIndices = pageIndices
+      ? (typeof pageIndices === 'string' ? JSON.parse(pageIndices) : pageIndices).map(i => parseInt(i))
+      : null;
+
+    const rotatedPdf = await rotatePdfPages(req.file.buffer, parseInt(rotation), parsedIndices);
+
+    const cloudinaryResult = await uploadBufferToCloudinary(rotatedPdf, {
+      resource_type: 'raw',
+      format: 'pdf',
+    });
+
+    res.json({
+      success: true,
+      data: {
+        url: cloudinaryResult.secure_url,
+        publicId: cloudinaryResult.public_id,
+        size: cloudinaryResult.bytes,
+        rotation: parseInt(rotation),
+      },
     });
   } catch (error) {
     next(error);

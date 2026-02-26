@@ -15,8 +15,12 @@ export default {
     apiSecret: process.env.CLOUDINARY_API_SECRET,
   },
   
+  groq: {
+    apiKey: process.env.GROQ_API_KEY,
+  },
+  
   upload: {
-    maxFileSize: parseInt(process.env.MAX_FILE_SIZE) || 10 * 1024 * 1024, // 10MB
+    maxFileSize: parseInt(process.env.MAX_FILE_SIZE) || 25 * 1024 * 1024, // 25MB
     allowedMimeTypes: [
       'image/jpeg',
       'image/png',

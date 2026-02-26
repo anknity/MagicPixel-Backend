@@ -58,18 +58,21 @@ app.use('/api', routes);
 app.get('/', (req, res) => {
   res.json({
     name: 'MagicPixels API',
-    version: '1.0.0',
-    description: 'AI-powered image processing API',
+    version: '2.0.0',
+    description: 'AI-powered image processing API with Groq & Gemini AI',
     endpoints: {
       health: '/api/health',
       upload: '/api/upload',
       resize: '/api/resize',
       compress: '/api/compress',
       convert: '/api/convert',
+      crop: '/api/crop',
       pdf: '/api/pdf',
       backgroundRemove: '/api/background-remove',
+      watermarkRemove: '/api/watermark-remove',
       aiEnhance: '/api/ai-enhance',
       aiEdit: '/api/ai-edit',
+      cloudinaryTools: '/api/cloudinary',
     },
   });
 });

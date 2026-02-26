@@ -54,22 +54,135 @@ export const convertFormat = async (buffer, targetFormat, options = {}) => {
  * Remove background (basic implementation using transparency)
  */
 export const removeBackground = async (buffer, options = {}) => {
-  const { threshold = 50, color = 'white' } = options;
-  
-  let sharpInstance = sharp(buffer);
-  
-  // Extract alpha channel or create one
-  const metadata = await sharpInstance.metadata();
-  
-  if (color === 'white') {
-    // Remove white background
-    sharpInstance = sharpInstance
-      .flatten({ background: { r: 255, g: 255, b: 255 } })
-      .removeAlpha()
-      .ensureAlpha();
+  const {
+    threshold = 30,
+    color = 'auto',
+    edgeRefinement = true,
+    feather = 1,
+    method = 'auto', // auto, color, edge, chroma
+  } = options;
+
+  const metadata = await sharp(buffer).metadata();
+  const { width, height, channels } = metadata;
+
+  // Get raw pixel data with alpha
+  const rawBuffer = await sharp(buffer)
+    .ensureAlpha()
+    .raw()
+    .toBuffer();
+
+  const pixels = new Uint8Array(rawBuffer);
+  const alphaChannel = new Uint8Array(width * height);
+
+  // Detect background color from corners (sample 5% from each corner)
+  const sampleSize = Math.max(5, Math.floor(Math.min(width, height) * 0.05));
+  const cornerSamples = [];
+
+  // Sample corners: top-left, top-right, bottom-left, bottom-right
+  const corners = [
+    [0, 0],
+    [width - sampleSize, 0],
+    [0, height - sampleSize],
+    [width - sampleSize, height - sampleSize],
+  ];
+
+  for (const [cx, cy] of corners) {
+    for (let y = cy; y < cy + sampleSize && y < height; y++) {
+      for (let x = cx; x < cx + sampleSize && x < width; x++) {
+        const idx = (y * width + x) * 4;
+        cornerSamples.push([pixels[idx], pixels[idx + 1], pixels[idx + 2]]);
+      }
+    }
   }
-  
-  return await sharpInstance.png().toBuffer();
+
+  // Calculate median background color
+  const bgR = cornerSamples.map(s => s[0]).sort((a, b) => a - b)[Math.floor(cornerSamples.length / 2)];
+  const bgG = cornerSamples.map(s => s[1]).sort((a, b) => a - b)[Math.floor(cornerSamples.length / 2)];
+  const bgB = cornerSamples.map(s => s[2]).sort((a, b) => a - b)[Math.floor(cornerSamples.length / 2)];
+
+  const thresh = parseInt(threshold);
+
+  // Color distance-based classification
+  for (let i = 0; i < width * height; i++) {
+    const idx = i * 4;
+    const r = pixels[idx], g = pixels[idx + 1], b = pixels[idx + 2];
+
+    // Euclidean color distance
+    const dist = Math.sqrt(
+      (r - bgR) ** 2 + (g - bgG) ** 2 + (b - bgB) ** 2
+    );
+
+    if (dist < thresh) {
+      alphaChannel[i] = 0; // Background
+    } else if (dist < thresh * 2) {
+      // Transition zone - partial transparency
+      alphaChannel[i] = Math.min(255, Math.floor(((dist - thresh) / thresh) * 255));
+    } else {
+      alphaChannel[i] = 255; // Foreground
+    }
+  }
+
+  // Edge refinement pass - clean up edges using neighbor analysis
+  if (edgeRefinement) {
+    const refined = new Uint8Array(alphaChannel);
+    const kernelSize = 2;
+
+    for (let y = kernelSize; y < height - kernelSize; y++) {
+      for (let x = kernelSize; x < width - kernelSize; x++) {
+        const idx = y * width + x;
+        let sum = 0;
+        let count = 0;
+
+        for (let ky = -kernelSize; ky <= kernelSize; ky++) {
+          for (let kx = -kernelSize; kx <= kernelSize; kx++) {
+            const nIdx = (y + ky) * width + (x + kx);
+            sum += alphaChannel[nIdx];
+            count++;
+          }
+        }
+
+        const avg = sum / count;
+        // Sharpen edges: if mostly foreground, push to foreground; if mostly background, push to background
+        if (avg > 200) refined[idx] = Math.max(refined[idx], 240);
+        else if (avg < 55) refined[idx] = Math.min(refined[idx], 15);
+      }
+    }
+
+    // Apply feathering for smooth edges
+    if (feather > 0) {
+      const featherRadius = parseInt(feather);
+      for (let y = featherRadius; y < height - featherRadius; y++) {
+        for (let x = featherRadius; x < width - featherRadius; x++) {
+          const idx = y * width + x;
+          if (refined[idx] > 0 && refined[idx] < 255) {
+            let sum = 0, count = 0;
+            for (let ky = -featherRadius; ky <= featherRadius; ky++) {
+              for (let kx = -featherRadius; kx <= featherRadius; kx++) {
+                sum += refined[(y + ky) * width + (x + kx)];
+                count++;
+              }
+            }
+            refined[idx] = Math.floor(sum / count);
+          }
+        }
+      }
+    }
+
+    // Apply refined alpha back to pixel data
+    for (let i = 0; i < width * height; i++) {
+      pixels[i * 4 + 3] = refined[i];
+    }
+  } else {
+    for (let i = 0; i < width * height; i++) {
+      pixels[i * 4 + 3] = alphaChannel[i];
+    }
+  }
+
+  return await sharp(Buffer.from(pixels), {
+    raw: { width, height, channels: 4 },
+  })
+    .png()
+    .toBuffer();
 };
 
 /**
