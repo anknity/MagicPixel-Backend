@@ -92,8 +92,8 @@ app.use(errorHandler);
 setInterval(cleanupOldFiles, 60 * 60 * 1000);
 
 // Start server
-const PORT = config.port;
-app.listen(PORT, () => {
+const PORT = parseInt(process.env.PORT, 10) || config.port || 5000;
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`
   ╔════════════════════════════════════════════════════════════════╗
   ║                                                                ║

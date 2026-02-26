@@ -51,139 +51,150 @@ export const convertFormat = async (buffer, targetFormat, options = {}) => {
 };
 
 /**
- * Remove background (basic implementation using transparency)
+ * Remove background - improved with full border scan + multi-color detection
  */
 export const removeBackground = async (buffer, options = {}) => {
   const {
     threshold = 30,
-    color = 'auto',
     edgeRefinement = true,
     feather = 1,
-    method = 'auto', // auto, color, edge, chroma
   } = options;
 
   const metadata = await sharp(buffer).metadata();
-  const { width, height, channels } = metadata;
+  const { width, height } = metadata;
 
-  // Get raw pixel data with alpha
-  const rawBuffer = await sharp(buffer)
-    .ensureAlpha()
-    .raw()
-    .toBuffer();
-
+  // Always work in RGBA
+  const rawBuffer = await sharp(buffer).ensureAlpha().raw().toBuffer();
   const pixels = new Uint8Array(rawBuffer);
   const alphaChannel = new Uint8Array(width * height);
 
-  // Detect background color from corners (sample 5% from each corner)
-  const sampleSize = Math.max(5, Math.floor(Math.min(width, height) * 0.05));
-  const cornerSamples = [];
+  // ── Step 1: Scan the ENTIRE border to build a robust background palette ──
+  const borderSamples = [];
+  const borderStep = Math.max(1, Math.floor(Math.min(width, height) / 100)); // up to 100 samples/edge
 
-  // Sample corners: top-left, top-right, bottom-left, bottom-right
-  const corners = [
-    [0, 0],
-    [width - sampleSize, 0],
-    [0, height - sampleSize],
-    [width - sampleSize, height - sampleSize],
-  ];
-
-  for (const [cx, cy] of corners) {
-    for (let y = cy; y < cy + sampleSize && y < height; y++) {
-      for (let x = cx; x < cx + sampleSize && x < width; x++) {
-        const idx = (y * width + x) * 4;
-        cornerSamples.push([pixels[idx], pixels[idx + 1], pixels[idx + 2]]);
-      }
-    }
+  // top & bottom rows
+  for (let x = 0; x < width; x += borderStep) {
+    const topIdx = (0 * width + x) * 4;
+    const botIdx = ((height - 1) * width + x) * 4;
+    borderSamples.push([pixels[topIdx], pixels[topIdx + 1], pixels[topIdx + 2]]);
+    borderSamples.push([pixels[botIdx], pixels[botIdx + 1], pixels[botIdx + 2]]);
+  }
+  // left & right columns
+  for (let y = 0; y < height; y += borderStep) {
+    const leftIdx = (y * width + 0) * 4;
+    const rightIdx = (y * width + (width - 1)) * 4;
+    borderSamples.push([pixels[leftIdx], pixels[leftIdx + 1], pixels[leftIdx + 2]]);
+    borderSamples.push([pixels[rightIdx], pixels[rightIdx + 1], pixels[rightIdx + 2]]);
   }
 
-  // Calculate median background color
-  const bgR = cornerSamples.map(s => s[0]).sort((a, b) => a - b)[Math.floor(cornerSamples.length / 2)];
-  const bgG = cornerSamples.map(s => s[1]).sort((a, b) => a - b)[Math.floor(cornerSamples.length / 2)];
-  const bgB = cornerSamples.map(s => s[2]).sort((a, b) => a - b)[Math.floor(cornerSamples.length / 2)];
+  // ── Step 2: Cluster border samples → find up to 3 dominant BG colours ──
+  const clusters = buildClusters(borderSamples, 3);
 
   const thresh = parseInt(threshold);
+  const softBand = thresh * 1.5; // transition width
 
-  // Color distance-based classification
+  // ── Step 3: For every pixel find minimum distance to any BG cluster ──
   for (let i = 0; i < width * height; i++) {
     const idx = i * 4;
     const r = pixels[idx], g = pixels[idx + 1], b = pixels[idx + 2];
 
-    // Euclidean color distance
-    const dist = Math.sqrt(
-      (r - bgR) ** 2 + (g - bgG) ** 2 + (b - bgB) ** 2
-    );
+    let minDist = Infinity;
+    for (const { r: cr, g: cg, b: cb } of clusters) {
+      const d = Math.sqrt((r - cr) ** 2 + (g - cg) ** 2 + (b - cb) ** 2);
+      if (d < minDist) minDist = d;
+    }
 
-    if (dist < thresh) {
-      alphaChannel[i] = 0; // Background
-    } else if (dist < thresh * 2) {
-      // Transition zone - partial transparency
-      alphaChannel[i] = Math.min(255, Math.floor(((dist - thresh) / thresh) * 255));
+    if (minDist < thresh) {
+      alphaChannel[i] = 0;
+    } else if (minDist < thresh + softBand) {
+      // smooth feather in transition zone
+      alphaChannel[i] = Math.round(((minDist - thresh) / softBand) * 255);
     } else {
-      alphaChannel[i] = 255; // Foreground
+      alphaChannel[i] = 255;
     }
   }
 
-  // Edge refinement pass - clean up edges using neighbor analysis
+  // ── Step 4: Morphological clean-up (erode noise, then smooth) ──
   if (edgeRefinement) {
     const refined = new Uint8Array(alphaChannel);
-    const kernelSize = 2;
+    const k = 2;
 
-    for (let y = kernelSize; y < height - kernelSize; y++) {
-      for (let x = kernelSize; x < width - kernelSize; x++) {
-        const idx = y * width + x;
-        let sum = 0;
-        let count = 0;
-
-        for (let ky = -kernelSize; ky <= kernelSize; ky++) {
-          for (let kx = -kernelSize; kx <= kernelSize; kx++) {
-            const nIdx = (y + ky) * width + (x + kx);
-            sum += alphaChannel[nIdx];
-            count++;
+    for (let y = k; y < height - k; y++) {
+      for (let x = k; x < width - k; x++) {
+        const ci = y * width + x;
+        let sum = 0, cnt = 0;
+        for (let dy = -k; dy <= k; dy++) {
+          for (let dx = -k; dx <= k; dx++) {
+            sum += alphaChannel[(y + dy) * width + (x + dx)];
+            cnt++;
           }
         }
-
-        const avg = sum / count;
-        // Sharpen edges: if mostly foreground, push to foreground; if mostly background, push to background
-        if (avg > 200) refined[idx] = Math.max(refined[idx], 240);
-        else if (avg < 55) refined[idx] = Math.min(refined[idx], 15);
+        const avg = sum / cnt;
+        if (avg > 210) refined[ci] = Math.max(refined[ci], 245);
+        else if (avg < 45) refined[ci] = Math.min(refined[ci], 10);
       }
     }
 
-    // Apply feathering for smooth edges
-    if (feather > 0) {
-      const featherRadius = parseInt(feather);
-      for (let y = featherRadius; y < height - featherRadius; y++) {
-        for (let x = featherRadius; x < width - featherRadius; x++) {
-          const idx = y * width + x;
-          if (refined[idx] > 0 && refined[idx] < 255) {
-            let sum = 0, count = 0;
-            for (let ky = -featherRadius; ky <= featherRadius; ky++) {
-              for (let kx = -featherRadius; kx <= featherRadius; kx++) {
-                sum += refined[(y + ky) * width + (x + kx)];
-                count++;
-              }
+    // feather pass
+    const fr = Math.max(1, parseInt(feather));
+    for (let y = fr; y < height - fr; y++) {
+      for (let x = fr; x < width - fr; x++) {
+        const ci = y * width + x;
+        if (refined[ci] > 0 && refined[ci] < 255) {
+          let sum = 0, cnt = 0;
+          for (let dy = -fr; dy <= fr; dy++) {
+            for (let dx = -fr; dx <= fr; dx++) {
+              sum += refined[(y + dy) * width + (x + dx)];
+              cnt++;
             }
-            refined[idx] = Math.floor(sum / count);
           }
+          refined[ci] = Math.round(sum / cnt);
         }
       }
     }
 
-    // Apply refined alpha back to pixel data
-    for (let i = 0; i < width * height; i++) {
-      pixels[i * 4 + 3] = refined[i];
-    }
+    for (let i = 0; i < width * height; i++) pixels[i * 4 + 3] = refined[i];
   } else {
-    for (let i = 0; i < width * height; i++) {
-      pixels[i * 4 + 3] = alphaChannel[i];
-    }
+    for (let i = 0; i < width * height; i++) pixels[i * 4 + 3] = alphaChannel[i];
   }
 
   return await sharp(Buffer.from(pixels), {
     raw: { width, height, channels: 4 },
-  })
-    .png()
-    .toBuffer();
+  }).png().toBuffer();
 };
+
+/**
+ * Build up to `k` colour clusters from samples using simple k-means (5 iterations)
+ */
+function buildClusters(samples, k) {
+  if (samples.length === 0) return [{ r: 255, g: 255, b: 255 }];
+
+  // Seed centroids evenly from samples
+  const step = Math.floor(samples.length / k);
+  let centers = Array.from({ length: k }, (_, i) => ({
+    r: samples[Math.min(i * step, samples.length - 1)][0],
+    g: samples[Math.min(i * step, samples.length - 1)][1],
+    b: samples[Math.min(i * step, samples.length - 1)][2],
+  }));
+
+  for (let iter = 0; iter < 5; iter++) {
+    const sums = centers.map(() => ({ r: 0, g: 0, b: 0, n: 0 }));
+    for (const [r, g, b] of samples) {
+      let best = 0, bestD = Infinity;
+      for (let ci = 0; ci < centers.length; ci++) {
+        const d = (r - centers[ci].r) ** 2 + (g - centers[ci].g) ** 2 + (b - centers[ci].b) ** 2;
+        if (d < bestD) { bestD = d; best = ci; }
+      }
+      sums[best].r += r; sums[best].g += g; sums[best].b += b; sums[best].n++;
+    }
+    centers = sums.map((s, i) =>
+      s.n > 0
+        ? { r: Math.round(s.r / s.n), g: Math.round(s.g / s.n), b: Math.round(s.b / s.n) }
+        : centers[i]
+    );
+  }
+  return centers;
+}
 
 /**
  * Get image metadata

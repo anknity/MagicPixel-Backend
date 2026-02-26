@@ -94,99 +94,105 @@ router.post('/detect', aiLimiter, uploadMemory.single('image'), async (req, res,
 });
 
 /**
- * Advanced watermark removal using multi-pass frequency filtering
+ * Advanced watermark removal – patch-based inpainting approach
  */
 async function removeWatermarkAdvanced(buffer, metadata, strength, detection) {
-  const { width, height, channels } = metadata;
+  const { width, height } = metadata;
+  const ch = 3; // work in RGB
 
-  // Step 1: Create multiple processed versions
-  // Median filter pass - smooths out text/logo watermarks
-  const medianFiltered = await sharp(buffer)
-    .median(Math.round(3 * strength))
-    .toBuffer();
+  const rgbBuf = await sharp(buffer).removeAlpha().raw().toBuffer();
+  const original = new Uint8Array(rgbBuf);
 
-  // Gaussian blur pass - for blending
-  const blurred = await sharp(buffer)
-    .blur(Math.max(1, Math.round(2 * strength)))
-    .toBuffer();
+  const blurRadius = Math.max(2, Math.round(3 * strength));
+  const blurBuf = await sharp(buffer).removeAlpha().blur(blurRadius).raw().toBuffer();
+  const blurred = new Uint8Array(blurBuf);
 
-  // Edge-preserved smoothing
-  const smoothed = await sharp(buffer)
-    .sharpen({ sigma: 0.5 })
-    .blur(Math.max(1, Math.round(1.5 * strength)))
-    .sharpen({ sigma: 1.0, m1: 1.0, m2: 0.5 })
-    .toBuffer();
+  const medSize = Math.max(3, (Math.round(5 * strength) | 1));
+  const medBuf = await sharp(buffer).removeAlpha().median(medSize).raw().toBuffer();
+  const median = new Uint8Array(medBuf);
 
-  // Step 2: Get raw pixel data
-  const original = await sharp(buffer).raw().toBuffer();
-  const medianData = await sharp(medianFiltered).raw().toBuffer();
-  const blurData = await sharp(blurred).raw().toBuffer();
-  const smoothData = await sharp(smoothed).raw().toBuffer();
+  // ── Build watermark mask ──
+  const isMask = new Uint8Array(width * height);
+  const highFreqThresh = 18 * strength;
 
-  // Step 3: Intelligent blending based on local variance
-  const result = Buffer.alloc(original.length);
-  const ch = channels || 3;
-  const pixelCount = width * height;
-
-  for (let i = 0; i < pixelCount; i++) {
+  for (let i = 0; i < width * height; i++) {
     const idx = i * ch;
-    
-    // Calculate local contrast (simple gradient-based detection)
-    const x = i % width;
-    const y = Math.floor(i / width);
-    
-    let localVariance = 0;
-    
-    // Sample neighbors
-    const offsets = [-1, 0, 1];
-    let count = 0;
-    
-    for (const dx of offsets) {
-      for (const dy of offsets) {
-        const nx = x + dx;
-        const ny = y + dy;
-        if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
-          const nIdx = (ny * width + nx) * ch;
-          for (let c = 0; c < Math.min(ch, 3); c++) {
-            localVariance += Math.abs(original[idx + c] - original[nIdx + c]);
-          }
-          count++;
+    let hf = 0;
+    for (let c = 0; c < ch; c++) hf += Math.abs(original[idx + c] - blurred[idx + c]);
+    hf /= ch;
+
+    const brightness = (original[idx] + original[idx + 1] + original[idx + 2]) / 3;
+    const isNearWhite = brightness > 200;
+
+    if (hf > highFreqThresh && hf < 90) {
+      isMask[i] = 1;
+    } else if (isNearWhite) {
+      const x = i % width, y = Math.floor(i / width);
+      let variance = 0, cnt = 0;
+      for (let dy = -2; dy <= 2; dy++) {
+        for (let dx = -2; dx <= 2; dx++) {
+          const nx = x + dx, ny = y + dy;
+          if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+          const ni = (ny * width + nx) * ch;
+          for (let c = 0; c < ch; c++) variance += Math.abs(original[idx + c] - original[ni + c]);
+          cnt++;
         }
       }
+      if (cnt > 0 && variance / cnt < 30) isMask[i] = 1;
     }
-    
-    localVariance /= (count * Math.min(ch, 3));
-    
-    // Watermark pixels tend to have specific characteristics:
-    // - High local contrast (text edges) or very uniform (semi-transparent overlay)
-    // - Often lighter/brighter than surroundings
-    
-    const isLikelyWatermark = localVariance > 15 * strength && localVariance < 80;
-    const blendFactor = isLikelyWatermark ? Math.min(0.9, 0.5 * strength) : 0.1;
-    
-    for (let c = 0; c < ch; c++) {
-      if (isLikelyWatermark) {
-        // Blend median + smooth for watermark areas
-        result[idx + c] = Math.round(
-          original[idx + c] * (1 - blendFactor) +
-          medianData[idx + c] * blendFactor * 0.6 +
-          smoothData[idx + c] * blendFactor * 0.4
-        );
-      } else {
-        // Keep original for clean areas with slight smoothing
-        result[idx + c] = Math.round(
-          original[idx + c] * 0.95 +
-          smoothData[idx + c] * 0.05
-        );
+  }
+
+  // ── Dilate mask to cover edges ──
+  const dilated = new Uint8Array(isMask);
+  const dr = Math.max(1, Math.round(strength));
+  for (let y = dr; y < height - dr; y++) {
+    for (let x = dr; x < width - dr; x++) {
+      if (!isMask[y * width + x]) continue;
+      for (let dy = -dr; dy <= dr; dy++)
+        for (let dx = -dr; dx <= dr; dx++)
+          dilated[(y + dy) * width + (x + dx)] = 1;
+    }
+  }
+
+  // ── Patch-based fill (3 passes, growing neighbourhood radius) ──
+  const result = Buffer.from(original);
+  const passes = [
+    { radius: Math.round(8 * strength), maxPatch: 6 },
+    { radius: Math.round(14 * strength), maxPatch: 12 },
+    { radius: Math.round(20 * strength), maxPatch: 20 },
+  ];
+
+  for (const { radius, maxPatch } of passes) {
+    const step = Math.max(1, Math.floor(radius / maxPatch));
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const i = y * width + x;
+        if (!dilated[i]) continue;
+        let rS = 0, gS = 0, bS = 0, cnt = 0;
+        for (let dy = -radius; dy <= radius; dy += step) {
+          for (let dx = -radius; dx <= radius; dx += step) {
+            if (dx === 0 && dy === 0) continue;
+            const nx = x + dx, ny = y + dy;
+            if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+            if (dilated[ny * width + nx]) continue;
+            const ni = (ny * width + nx) * ch;
+            rS += result[ni]; gS += result[ni + 1]; bS += result[ni + 2];
+            cnt++;
+          }
+        }
+        const idx = i * ch;
+        if (cnt > 0) {
+          result[idx]     = Math.round((rS / cnt) * 0.7 + median[idx]     * 0.3);
+          result[idx + 1] = Math.round((gS / cnt) * 0.7 + median[idx + 1] * 0.3);
+          result[idx + 2] = Math.round((bS / cnt) * 0.7 + median[idx + 2] * 0.3);
+        } else {
+          result[idx] = median[idx]; result[idx+1] = median[idx+1]; result[idx+2] = median[idx+2];
+        }
       }
     }
   }
 
-  return await sharp(result, {
-    raw: { width, height, channels: ch },
-  })
-    .png()
-    .toBuffer();
+  return await sharp(result, { raw: { width, height, channels: ch } }).png().toBuffer();
 }
 
 /**
